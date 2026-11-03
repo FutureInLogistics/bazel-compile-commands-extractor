@@ -6,6 +6,7 @@ When `bazel run`, these rules refresh the compile_commands.json in the root of y
 Best explained by concrete example--copy the following and follow the comments:
 ```Starlark
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
+load("@rules_python//python:py_binary.bzl", "py_binary")
 
 refresh_compile_commands(
     name = "refresh_compile_commands",
@@ -92,7 +93,7 @@ def refresh_compile_commands(
     _expand_template(name = script_name, labels_to_flags = targets, exclude_headers = exclude_headers, exclude_external_sources = exclude_external_sources, **kwargs)
 
     # Combine them so the wrapper calls the main script
-    native.py_binary(
+    py_binary(
         name = name,
         main = version_checker_script_name,
         srcs = [version_checker_script_name, script_name],

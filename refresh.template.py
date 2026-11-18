@@ -150,9 +150,27 @@ def _get_bazel_cached_action_keys():
     # Make sure we get notified of changes to the format, since bazel dump --action_cache isn't public API.
     # We continue gracefully, rather than asserting, because we can (conservatively) continue without hitting cache.
     if not marked_as_empty and not action_keys:
-        log_warning(">>> Failed to get action keys from Bazel.\nPlease file an issue with the following log:\n", action_cache_process.stdout)
+        # The start of the dump is enough to see its format. All of it would be several lines per action Bazel ever cached, easily hundreds of thousands.
+        lines_of_dump_to_log = 10
+        dump_start = '\n'.join(action_cache_process.stdout.splitlines()[:lines_of_dump_to_log])
+        log_warning(""">>> Failed to get action keys from Bazel, so we'll run the preprocessor on every file to find its headers, even where Bazel already did.
+    This is expected with Bazel 9.3.2, whose `bazel dump --action_cache` lists no actionKey. Otherwise, please file an issue with the start of the dump, below.
+    Continuing gracefully...
+""", dump_start)
 
     return action_keys
+
+
+_bazel_cached_action_keys = frozenset() # Set in each worker process by _set_bazel_cached_action_keys.
+
+
+def _set_bazel_cached_action_keys(action_keys):
+    """Initializes a worker process with the action keys its parent got from Bazel.
+
+    The workers don't share the parent's lru_cache. Without this, each of them would run `bazel dump --action_cache` itself, and log every failure to parse it again.
+    """
+    global _bazel_cached_action_keys
+    _bazel_cached_action_keys = action_keys
 
 
 def _parse_headers_from_makefile_deps(d_file_content: str, source_path_for_sanity_check: typing.Optional[str] = None):
@@ -240,7 +258,7 @@ def _get_headers_gcc(compile_action, source_path: str, action_key: str):
     # Flags reference here: https://clang.llvm.org/docs/ClangCommandLineReference.html
 
     # Check to see if Bazel has an (approximately) fresh cache of the included headers, and if so, use them to avoid a slow preprocessing step.
-    if action_key in _get_bazel_cached_action_keys():  # Safe because Bazel only holds one cached action key per path, and the key contains the path.
+    if action_key in _bazel_cached_action_keys:  # Safe because Bazel only holds one cached action key per path, and the key contains the path.
         for i, arg in enumerate(compile_action.arguments):
             if arg.startswith('-MF'):
                 if len(arg) > 3: # Either appended, like -MF<file>
@@ -1154,11 +1172,15 @@ def _convert_compile_commands(aquery_output):
             action.is_external = target.startswith('@') and not target.startswith('@//')
 
     # Process each action from Bazelisms -> file paths and their clang commands
-    # Threads instead of processes because most of the execution time is farmed out to subprocesses. No need to sidestep the GIL. Might change after https://github.com/clangd/clangd/issues/123 resolved
+    # Processes instead of threads because, with threads, the GIL kept the work to about one core, even though most of it is farmed out to subprocesses.
+    # The action keys are only needed to find headers, and are fetched here, once, rather than by every worker. See _set_bazel_cached_action_keys.
+    bazel_cached_action_keys = frozenset() if {exclude_headers} == "all" else _get_bazel_cached_action_keys()
     with concurrent.futures.ProcessPoolExecutor(
-        max_workers=os.cpu_count() # Default before Python 3.13, after which it is os.process_cpu_count().
-    ) as threadpool:
-        outputs = threadpool.map(_get_cpp_command_for_files, aquery_output.actions)
+        max_workers=os.cpu_count(), # Default before Python 3.13, after which it is os.process_cpu_count().
+        initializer=_set_bazel_cached_action_keys,
+        initargs=(bazel_cached_action_keys,),
+    ) as process_pool:
+        outputs = process_pool.map(_get_cpp_command_for_files, aquery_output.actions)
 
     # Yield as compile_commands.json entries
     header_files_already_written = set()

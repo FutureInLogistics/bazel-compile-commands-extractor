@@ -12,4 +12,7 @@ if sys.version_info < (3,6):
 
 # Only import -> parse once we're sure we have the required python version
 import {to_run}
-{to_run}.main()
+# The guard matters because {to_run} runs its work in a process pool. Where Python spawns rather than forks the workers (the default on macOS), each worker re-runs this file as __mp_main__.
+# Unguarded, every worker would then rerun the whole tool, including its `bazel aquery`, before dying when it tries to start a pool of its own.
+if __name__ == '__main__':
+    {to_run}.main()

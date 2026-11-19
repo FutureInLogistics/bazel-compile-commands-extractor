@@ -128,7 +128,10 @@ def _get_bazel_version():
 
 @functools.lru_cache(maxsize=None)
 def _get_bazel_cached_action_keys():
-    """Gets the set of actionKeys cached in bazel-out."""
+    """Gets the set of actionKeys (Bazel < 9) or primary output paths (Bazel >= 9) cached in bazel-out.
+
+    Bazel 9 stopped printing `actionKey = ` in `bazel dump --action_cache`; entries are listed as `<index> -> <primary output path>` instead.
+    """
     action_cache_process = subprocess.run(
         ['bazel', 'dump', '--action_cache'],
         # MIN_PY=3.7: Replace PIPEs with capture_output.
@@ -144,6 +147,8 @@ def _get_bazel_cached_action_keys():
         line = line.strip()
         if line.startswith('actionKey = '):
             action_keys.add(line[12:]) # Remainder after actionKey =
+        elif ' -> ' in line and line.endswith(_get_headers.output_extensions):
+            action_keys.add(line.split(' -> ', 1)[1]) # Bazel >= 9: primary output path, e.g. `105 -> bazel-out/.../foo.pic.o`
         elif line.startswith('Action cache (0 records):'):
             marked_as_empty = True
 
@@ -154,7 +159,7 @@ def _get_bazel_cached_action_keys():
         lines_of_dump_to_log = 10
         dump_start = '\n'.join(action_cache_process.stdout.splitlines()[:lines_of_dump_to_log])
         log_warning(""">>> Failed to get action keys from Bazel, so we'll run the preprocessor on every file to find its headers, even where Bazel already did.
-    This is expected with Bazel 9.3.2, whose `bazel dump --action_cache` lists no actionKey. Otherwise, please file an issue with the start of the dump, below.
+    Please file an issue with the start of the dump, below.
     Continuing gracefully...
 """, dump_start)
 
@@ -258,7 +263,8 @@ def _get_headers_gcc(compile_action, source_path: str, action_key: str):
     # Flags reference here: https://clang.llvm.org/docs/ClangCommandLineReference.html
 
     # Check to see if Bazel has an (approximately) fresh cache of the included headers, and if so, use them to avoid a slow preprocessing step.
-    if action_key in _bazel_cached_action_keys:  # Safe because Bazel only holds one cached action key per path, and the key contains the path.
+    output_path = next((compile_action.arguments[i + 1] for i, arg in enumerate(compile_action.arguments[:-1]) if arg == '-o'), None)
+    if action_key in _bazel_cached_action_keys or output_path in _bazel_cached_action_keys:  # Safe because Bazel only holds one cached action key per path, and the key contains the path. Output paths are unique per action, too.
         for i, arg in enumerate(compile_action.arguments):
             if arg.startswith('-MF'):
                 if len(arg) > 3: # Either appended, like -MF<file>
